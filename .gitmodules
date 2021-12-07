@@ -1,0 +1,3 @@
+[submodule "mayastor-api"]
+	path = mayastor-api
+	url = https://github.com/openebs/mayastor-api
