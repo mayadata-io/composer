@@ -20,13 +20,13 @@ use bollard::{
 };
 use futures::{StreamExt, TryStreamExt};
 use ipnetwork::Ipv4Network;
+use once_cell::sync::OnceCell;
 use tonic::transport::Channel;
 
 use bollard::{
     container::KillContainerOptions, image::CreateImageOptions, models::ContainerInspectResponse,
     network::DisconnectNetworkOptions,
 };
-// use rpc::mayastor::{bdev_rpc_client::BdevRpcClient, mayastor_client::MayastorClient};
 
 use crate::rpc::mayastor::{bdev_rpc_client::BdevRpcClient, mayastor_client::MayastorClient};
 
@@ -40,6 +40,19 @@ pub struct RpcHandle {
     pub endpoint: SocketAddr,
     pub mayastor: MayastorClient<Channel>,
     pub bdev: BdevRpcClient<Channel>,
+}
+
+static PROJECT_ROOT: OnceCell<String> = OnceCell::new();
+
+/// Initialize the composer with target project root.
+/// Must be called only once and before any Binary object is constructed.
+pub fn initialize<T: AsRef<str>>(project_root: T) {
+    assert!(
+        PROJECT_ROOT.get().is_none(),
+        "Composer is already initialized"
+    );
+    tracing::trace!("Project directory set to {}", project_root.as_ref());
+    PROJECT_ROOT.get_or_init(|| project_root.as_ref().to_string());
 }
 
 impl RpcHandle {
@@ -88,10 +101,8 @@ pub struct Binary {
 impl Binary {
     /// Setup local binary from target debug and arguments
     pub fn from_dbg(name: &str) -> Self {
-        let path = std::path::PathBuf::from(std::env!("CARGO_MANIFEST_DIR"));
-        let srcdir = path.parent().unwrap().to_string_lossy();
-
-        Self::new(&format!("{}/target/debug/{}", srcdir, name), vec![])
+        let project_root = PROJECT_ROOT.get().expect("Project root is not initialized");
+        Self::new(&format!("{}/target/debug/{}", project_root, name), vec![])
     }
     /// Setup binary from path
     pub fn from_path(name: &str) -> Self {

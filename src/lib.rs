@@ -1,4 +1,6 @@
 mod composer;
 pub mod rpc;
 
-pub use composer::{Binary, Builder, BuilderConfigure, ComposeTest, ContainerSpec, RpcHandle};
+pub use composer::{
+    initialize, Binary, Builder, BuilderConfigure, ComposeTest, ContainerSpec, RpcHandle,
+};
