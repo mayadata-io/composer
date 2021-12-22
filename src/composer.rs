@@ -1327,7 +1327,7 @@ impl ComposeTest {
 
     /// start the container
     pub async fn start(&self, name: &str) -> Result<(), Error> {
-        println!("Start container: {}", name);
+        tracing::trace!("Start container: {}", name);
         let id = self
             .containers
             .get(name)
@@ -1338,7 +1338,7 @@ impl ComposeTest {
                 ),
             })?;
         if !self.reuse || self.prune_matching {
-            println!("Starting container: {}, ip: {}", name, id.1);
+            tracing::debug!("Starting container: {}, ip: {}", name, id.1);
             self.docker
                 .start_container::<&str>(id.0.as_str(), None)
                 .await?;
