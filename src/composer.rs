@@ -45,14 +45,21 @@ pub struct RpcHandle {
 static PROJECT_ROOT: OnceCell<String> = OnceCell::new();
 
 /// Initialize the composer with target project root.
-/// Must be called only once and before any Binary object is constructed.
+/// Must be called before any Binary object is constructed.
+/// If initialised more than once, the `project_root` **MUST** match previous initialisations.
 pub fn initialize<T: AsRef<str>>(project_root: T) {
-    assert!(
-        PROJECT_ROOT.get().is_none(),
-        "Composer is already initialized"
-    );
-    tracing::trace!("Project directory set to {}", project_root.as_ref());
-    PROJECT_ROOT.get_or_init(|| project_root.as_ref().to_string());
+    match PROJECT_ROOT.get() {
+        Some(root) => {
+            assert!(
+                root.eq(project_root.as_ref()),
+                "Attempting to re-initialise composer with a different project root directory"
+            );
+        }
+        None => {
+            tracing::trace!("Project directory set to {}", project_root.as_ref());
+            PROJECT_ROOT.get_or_init(|| project_root.as_ref().to_string());
+        }
+    }
 }
 
 impl RpcHandle {
