@@ -1,9 +1,4 @@
-use std::{
-    collections::HashMap,
-    net::{Ipv4Addr, SocketAddr, TcpStream},
-    thread,
-    time::Duration,
-};
+use std::{collections::HashMap, net::Ipv4Addr, thread, time::Duration};
 
 use bollard::{
     container::{
@@ -21,26 +16,18 @@ use bollard::{
 use futures::{StreamExt, TryStreamExt};
 use ipnetwork::Ipv4Network;
 use once_cell::sync::OnceCell;
-use tonic::transport::Channel;
 
 use bollard::{
     container::KillContainerOptions, image::CreateImageOptions, models::ContainerInspectResponse,
     network::DisconnectNetworkOptions,
 };
 
-use crate::rpc::mayastor::{bdev_rpc_client::BdevRpcClient, mayastor_client::MayastorClient};
+#[cfg(feature = "rpc")]
+use crate::rpc::RpcHandle;
 
 pub const TEST_NET_NAME: &str = "mayastor-testing-network";
 pub const TEST_LABEL_PREFIX: &str = "io.mayastor.test";
 pub const TEST_NET_NETWORK: &str = "10.1.0.0/16";
-
-#[derive(Clone)]
-pub struct RpcHandle {
-    pub name: String,
-    pub endpoint: SocketAddr,
-    pub mayastor: MayastorClient<Channel>,
-    pub bdev: BdevRpcClient<Channel>,
-}
 
 static PROJECT_ROOT: OnceCell<String> = OnceCell::new();
 
@@ -59,38 +46,6 @@ pub fn initialize<T: AsRef<str>>(project_root: T) {
             tracing::trace!("Project directory set to {}", project_root.as_ref());
             PROJECT_ROOT.get_or_init(|| project_root.as_ref().to_string());
         }
-    }
-}
-
-impl RpcHandle {
-    /// connect to the containers and construct a handle
-    async fn connect(name: String, endpoint: SocketAddr) -> Result<Self, String> {
-        let mut attempts = 40;
-        loop {
-            if TcpStream::connect_timeout(&endpoint, Duration::from_millis(100)).is_ok() {
-                break;
-            } else {
-                thread::sleep(Duration::from_millis(101));
-            }
-            attempts -= 1;
-            if attempts == 0 {
-                return Err(format!("Failed to connect to {}/{}", name, endpoint));
-            }
-        }
-
-        let mayastor = MayastorClient::connect(format!("http://{}", endpoint.to_string()))
-            .await
-            .unwrap();
-        let bdev = BdevRpcClient::connect(format!("http://{}", endpoint.to_string()))
-            .await
-            .unwrap();
-
-        Ok(Self {
-            name,
-            mayastor,
-            bdev,
-            endpoint,
-        })
     }
 }
 
@@ -1025,6 +980,11 @@ impl ComposeTest {
             .await
     }
 
+    /// Get a map of the loaded containers
+    pub fn containers(&self) -> &HashMap<ContainerName, (ContainerId, Ipv4Addr)> {
+        &self.containers
+    }
+
     /// get the container with the provided name
     pub async fn get_cluster_container(
         &self,
@@ -1494,6 +1454,12 @@ impl ComposeTest {
         ip.to_string()
     }
 
+    /// get a reference to the container ip
+    pub fn container_ip_as_ref(&self, name: &str) -> &Ipv4Addr {
+        let (_id, ip) = self.containers.get(name).unwrap();
+        ip
+    }
+
     /// check if a container exists
     pub async fn container_exists(&self, name: &str) -> bool {
         let containers = self
@@ -1565,13 +1531,16 @@ impl ComposeTest {
     }
 
     /// return grpc handles to the containers
+    #[cfg(feature = "rpc")]
     pub async fn grpc_handles(&self) -> Result<Vec<RpcHandle>, String> {
         let mut handles = Vec::new();
         for v in &self.containers {
             handles.push(
                 RpcHandle::connect(
                     v.0.clone(),
-                    format!("{}:10124", v.1 .1).parse::<SocketAddr>().unwrap(),
+                    format!("{}:10124", v.1 .1)
+                        .parse::<std::net::SocketAddr>()
+                        .unwrap(),
                 )
                 .await?,
             );
@@ -1581,12 +1550,13 @@ impl ComposeTest {
     }
 
     /// return grpc handle to the container
+    #[cfg(feature = "rpc")]
     pub async fn grpc_handle(&self, name: &str) -> Result<RpcHandle, String> {
         match self.containers.iter().find(|&c| c.0 == name) {
             Some(container) => Ok(RpcHandle::connect(
                 container.0.clone(),
                 format!("{}:10124", container.1 .1)
-                    .parse::<SocketAddr>()
+                    .parse::<std::net::SocketAddr>()
                     .unwrap(),
             )
             .await?),
