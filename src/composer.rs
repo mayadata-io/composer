@@ -753,8 +753,10 @@ impl Builder {
     async fn build_only(mut self) -> Result<ComposeTest, Box<dyn std::error::Error>> {
         self.override_debug_flags();
 
-        let path = std::path::PathBuf::from(std::env!("CARGO_MANIFEST_DIR"));
-        let srcdir = path.parent().unwrap().to_string_lossy().into();
+        let srcdir = PROJECT_ROOT
+            .get()
+            .expect("Project root is not initialized")
+            .clone();
         let docker = Docker::connect_with_unix_defaults()?;
 
         let mut cfg = HashMap::new();
