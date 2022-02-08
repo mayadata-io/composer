@@ -1,4 +1,11 @@
-use std::{collections::HashMap, net::Ipv4Addr, thread, time::Duration};
+use std::{
+    collections::HashMap,
+    ffi::{OsStr, OsString},
+    net::Ipv4Addr,
+    path::{Path, PathBuf},
+    thread,
+    time::Duration,
+};
 
 use bollard::{
     container::{
@@ -25,26 +32,35 @@ use bollard::{
 #[cfg(feature = "rpc")]
 use crate::rpc::RpcHandle;
 
+/// Converts a vector of Strings into vector of OsStrings.
+fn into_os_strs(v: &Vec<String>) -> Vec<OsString> {
+    v.iter().map(OsString::from).collect()
+}
+
 pub const TEST_NET_NAME: &str = "mayastor-testing-network";
 pub const TEST_LABEL_PREFIX: &str = "io.mayastor.test";
 pub const TEST_NET_NETWORK: &str = "10.1.0.0/16";
 
-static PROJECT_ROOT: OnceCell<String> = OnceCell::new();
+static PROJECT_ROOT: OnceCell<PathBuf> = OnceCell::new();
 
 /// Initialize the composer with target project root.
 /// Must be called before any Binary object is constructed.
 /// If initialised more than once, the `project_root` **MUST** match previous initialisations.
-pub fn initialize<T: AsRef<str>>(project_root: T) {
+pub fn initialize<T: AsRef<Path>>(project_root: T) {
+    let project_root = project_root.as_ref().to_path_buf();
     match PROJECT_ROOT.get() {
         Some(root) => {
             assert!(
-                root.eq(project_root.as_ref()),
+                root.eq(&project_root),
                 "Attempting to re-initialise composer with a different project root directory"
             );
         }
         None => {
-            tracing::trace!("Project directory set to {}", project_root.as_ref());
-            PROJECT_ROOT.get_or_init(|| project_root.as_ref().to_string());
+            tracing::trace!(
+                "Project directory set to {}",
+                project_root.to_str().unwrap()
+            );
+            PROJECT_ROOT.get_or_init(|| project_root);
         }
     }
 }
@@ -52,7 +68,7 @@ pub fn initialize<T: AsRef<str>>(project_root: T) {
 /// Path to local binary and arguments
 #[derive(Default, Clone)]
 pub struct Binary {
-    path: String,
+    path: PathBuf,
     arguments: Vec<String>,
     nats_arg: Option<String>,
     env: HashMap<String, String>,
@@ -64,10 +80,14 @@ impl Binary {
     /// Setup local binary from target debug and arguments
     pub fn from_dbg(name: &str) -> Self {
         let project_root = PROJECT_ROOT.get().expect("Project root is not initialized");
-        Self::new(&format!("{}/target/debug/{}", project_root, name), vec![])
+        let mut path = project_root.clone();
+        path.push("target");
+        path.push("debug");
+        path.push(name);
+        Self::new(&path, vec![])
     }
     /// Setup binary from path
-    pub fn from_path(name: &str) -> Self {
+    pub fn from_path<T: AsRef<Path>>(name: T) -> Self {
         Self::new(name, vec![])
     }
     /// Add single argument
@@ -125,25 +145,33 @@ impl Binary {
         }
     }
 
-    fn command(&self) -> String {
-        self.path.clone()
+    fn command(&self) -> OsString {
+        self.path.clone().into_os_string()
     }
-    fn commands(&self) -> Vec<String> {
-        let mut v = vec![self.path.clone()];
-        v.extend(self.arguments.clone());
+
+    fn commands(&self) -> Vec<OsString> {
+        let mut v = vec![self.command()];
+        v.extend(into_os_strs(&self.arguments));
         v
     }
+
     /// Run the `which` command to get location of the named binary
-    pub fn which(name: &str) -> std::io::Result<String> {
-        let output = std::process::Command::new("which").arg(name).output()?;
+    pub fn which<T: AsRef<Path>>(name: T) -> std::io::Result<String> {
+        let output = std::process::Command::new("which")
+            .arg(name.as_ref())
+            .output()?;
         if !output.status.success() {
-            return Err(std::io::Error::new(std::io::ErrorKind::NotFound, name));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                name.as_ref().to_str().unwrap(),
+            ));
         }
         Ok(String::from_utf8_lossy(&output.stdout).trim().into())
     }
-    fn new(path: &str, args: Vec<String>) -> Self {
+
+    fn new<T: AsRef<Path>>(path: T, args: Vec<String>) -> Self {
         Self {
-            path: Self::which(path).expect("Binary path should exist!"),
+            path: PathBuf::from(Self::which(path).expect("Binary path should exist!")),
             arguments: args,
             ..Default::default()
         }
@@ -162,7 +190,7 @@ pub struct ContainerSpec {
     /// Base image of the container
     image: Option<String>,
     /// Command to run
-    command: Option<String>,
+    command: Option<OsString>,
     /// Entrypoint
     entrypoint: Option<Vec<String>>,
     /// command arguments to run
@@ -182,10 +210,12 @@ pub struct ContainerSpec {
     env: HashMap<String, String>,
     /// Volume bind dst/source
     binds: HashMap<String, String>,
-    /// run the container as privileged
+    /// Run the container as privileged
     privileged: Option<bool>,
-    /// use default container mounts (like /tmp and /var/tmp)
+    /// Use default container mounts (like /tmp and /var/tmp)
     bypass_default_mounts: bool,
+    /// Bind binary directory instead of binary itself.
+    bind_binary_dir: bool,
 }
 
 impl ContainerSpec {
@@ -297,8 +327,8 @@ impl ContainerSpec {
     }
     /// Use a specific command to execute
     /// Note: this is not the entrypoint!
-    pub fn with_cmd(mut self, command: &str) -> Self {
-        self.command = Some(command.to_string());
+    pub fn with_cmd(mut self, command: &OsStr) -> Self {
+        self.command = Some(OsString::from(command));
         self
     }
     /// Add a container entrypoint
@@ -311,7 +341,7 @@ impl ContainerSpec {
         self.entrypoint = Some(entrypoints.into_iter().map(Into::into).collect());
         self
     }
-    /// use a volume binds between host path and container container
+    /// Use a volume binds between host path and container container
     pub fn with_bind(mut self, host: &str, container: &str) -> Self {
         self.binds.insert(container.to_string(), host.to_string());
         self
@@ -329,12 +359,12 @@ impl ContainerSpec {
         }
         vec
     }
-    /// run the container as privileged
+    /// Eun the container as privileged
     pub fn with_privileged(mut self, enable: Option<bool>) -> Self {
         self.privileged = enable;
         self
     }
-    /// check if the container is to run as privileged
+    /// Check if the container is to run as privileged
     pub fn privileged(&self) -> Option<bool> {
         if self.privileged.is_some() {
             self.privileged
@@ -343,6 +373,18 @@ impl ContainerSpec {
         } else {
             None
         }
+    }
+    /// If host binary is used, enable binding of host binary directory
+    /// instead of the path of the binary itself.
+    ///
+    /// The allows to access files in binary directory within the container.
+    /// For example, this is needed when the binary is linked to
+    /// a shared library located in the same directory.
+    ///
+    /// This option is false by default.
+    pub fn with_bind_binary_dir(mut self, enable: bool) -> Self {
+        self.bind_binary_dir = enable;
+        self
     }
 
     /// Environment variables as a vector with each element as:
@@ -355,7 +397,7 @@ impl ContainerSpec {
         vec
     }
     /// Command/entrypoint followed by/and arguments
-    fn commands(&self, network: &str) -> Vec<String> {
+    fn commands(&self, network: &str) -> Vec<OsString> {
         let mut commands = vec![];
         if let Some(mut binary) = self.binary.clone() {
             binary.setup_nats(network);
@@ -363,7 +405,8 @@ impl ContainerSpec {
         } else if let Some(command) = self.command.clone() {
             commands.push(command);
         }
-        commands.extend(self.arguments.clone().unwrap_or_default());
+        let args = self.arguments.clone().unwrap_or_default();
+        commands.extend(into_os_strs(&args));
         commands
     }
     /// Container spec's entrypoint
@@ -377,7 +420,7 @@ impl ContainerSpec {
         }
     }
     /// Get the container command, if any
-    fn command(&self, network: &str) -> Option<String> {
+    fn command(&self, network: &str) -> Option<OsString> {
         if let Some(mut binary) = self.binary.clone() {
             binary.setup_nats(network);
             Some(binary.command())
@@ -479,7 +522,7 @@ impl Builder {
                         if let Ok(ip) = ip.parse() {
                             tracing::debug!("Reloading existing container: {}", n);
                             self.existing_containers
-                                .insert(n[1..].into(), (container.id.unwrap_or_default(), ip));
+                                .insert(n[1 ..].into(), (container.id.unwrap_or_default(), ip));
                         }
                     }
                 }
@@ -499,7 +542,7 @@ impl Builder {
 
     /// finds the next unused ip
     pub fn next_ip(&self) -> Result<Ipv4Addr, Error> {
-        for ip in 2..=255u32 {
+        for ip in 2 ..= 255u32 {
             if let Some(ip) = self.network.nth(ip) {
                 if self.existing_containers.values().all(|(_, e)| e != &ip)
                     && self.containers.iter().all(|(_, e)| e != &ip)
@@ -770,7 +813,7 @@ pub struct ComposeTest {
     /// used as the network name
     name: String,
     /// the source dir the tests are run in
-    srcdir: String,
+    srcdir: PathBuf,
     /// handle to the docker daemon
     docker: Docker,
     /// the network id is used to attach containers to networks
@@ -1070,17 +1113,23 @@ impl ComposeTest {
         // pull the image, if missing
         self.pull_missing_image(&spec.image).await;
 
+        let srcdir_str = self.srcdir.to_str().unwrap();
         let mut binds = vec![
-            format!("{}:{}", self.srcdir, self.srcdir),
+            format!("{}:{}", srcdir_str, srcdir_str),
             "/dev/hugepages:/dev/hugepages:rw".into(),
         ];
 
         binds.extend(spec.binds());
         if let Some(bin) = &spec.binary {
             binds.push("/nix:/nix:ro".into());
-            let path = std::path::PathBuf::from(&bin.path);
-            if !path.starts_with("/nix") || !path.starts_with(&self.srcdir) {
-                binds.push(format!("{}:{}", bin.path, bin.path));
+            if !bin.path.starts_with("/nix") || !bin.path.starts_with(&self.srcdir) {
+                let path: &Path = if spec.bind_binary_dir {
+                    bin.path.parent().unwrap()
+                } else {
+                    bin.path.as_path()
+                };
+                let path = path.to_str().unwrap();
+                binds.push(format!("{}:{}", path, path));
             }
             if (spec.image.is_some() || self.image.is_some()) && spec.init.unwrap_or(true) {
                 if let Ok(tini) = Binary::which("tini") {
@@ -1155,20 +1204,20 @@ impl ComposeTest {
             .as_ref()
             .map_or_else(|| self.image.as_deref(), |s| Some(s.as_str()));
 
-        let mut entrypoint = spec.entrypoint(&self.image);
+        let mut entrypoint = into_os_strs(&spec.entrypoint(&self.image));
 
         if let Some(image) = image {
             // merge our host config with the container image's default host config parameters
             let image = self.docker.inspect_image(image).await.unwrap();
             let config = image.config.unwrap_or_default();
-            let mut img_cmd = config.cmd.unwrap_or_default();
+            let mut img_cmd = into_os_strs(&config.cmd.unwrap_or_default());
             if !img_cmd.is_empty() && spec.command(&self.network_id).is_none() {
                 // keep the default commands first, this way we can use the spec's cmd
                 // as additional arguments
                 img_cmd.extend(cmd);
                 cmd = img_cmd;
             }
-            let mut img_entrypoint = config.entrypoint.unwrap_or_default();
+            let mut img_entrypoint = into_os_strs(&config.entrypoint.unwrap_or_default());
             if !img_entrypoint.is_empty() && entrypoint.is_empty() {
                 // use the entrypoint from the container image
                 entrypoint = img_entrypoint;
@@ -1212,19 +1261,19 @@ impl ComposeTest {
 
         let name_label = format!("{}.name", self.label_prefix);
         let config = Config {
-            cmd: Some(cmd.iter().map(|s| s.as_str()).collect::<Vec<_>>()),
+            cmd: Some(cmd.iter().map(|s| s.to_str().unwrap()).collect()),
             env: Some(env.iter().map(|s| s.as_str()).collect()),
-            entrypoint: Some(entrypoint.iter().map(|s| s.as_str()).collect::<Vec<_>>()),
+            entrypoint: Some(entrypoint.iter().map(|s| s.to_str().unwrap()).collect()),
             image,
             hostname: Some(name),
             host_config: Some(host_config),
             networking_config: Some(NetworkingConfig { endpoints_config }),
-            working_dir: Some(self.srcdir.as_str()),
+            working_dir: Some(self.srcdir.to_str().unwrap()),
             volumes: Some(
                 vec![
                     ("/dev/hugepages", HashMap::new()),
                     ("/nix", HashMap::new()),
-                    (self.srcdir.as_str(), HashMap::new()),
+                    (self.srcdir.to_str().unwrap(), HashMap::new()),
                 ]
                 .into_iter()
                 .collect(),
